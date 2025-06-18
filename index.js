@@ -1,102 +1,128 @@
-require('dotenv').config(); // Cargar variables de entorno del archivo .env
-const express = require('express');
-const mongoose = require('mongoose');
-const { MessagingResponse } = require('twilio').twiml; // Para construir respuestas de Twilio
+// 1. Carga de módulos y configuración inicial
+require('dotenv').config(); // Carga las variables de entorno del archivo .env
+const express = require('express'); // Framework web para Node.js
+const mongoose = require('mongoose'); // ODM (Object Data Modeling) para MongoDB
+const TelegramBot = require('node-telegram-bot-api'); // Librería para interactuar con la API de Telegram
 
-const app = express();
+// Configura el puerto en el que escuchará el servidor Express.
+// Usa el puerto que Vercel le asigne (process.env.PORT) o el 3000 si está en local.
 const PORT = process.env.PORT || 3000;
+const app = express(); // Crea una instancia de la aplicación Express
 
-// --- Conexión a MongoDB ---
+// Obtén el token del bot de Telegram de las variables de entorno
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Crea una nueva instancia del bot de Telegram.
+// NOTA: No le pasamos el "polling: true" aquí porque usaremos webhooks en Vercel.
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+
+// 2. Conexión a MongoDB Atlas
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('Conectado a MongoDB Atlas'))
   .catch(err => console.error('Error al conectar a MongoDB:', err));
 
-// --- Definir el Modelo de Gasto ---
+// 3. Definición del Modelo de Gasto (Esquema de Mongoose)
+// Este es el plano de cómo se guardarán los datos de un gasto en tu base de datos.
 const expenseSchema = new mongoose.Schema({
-  amount: { type: Number, required: true },
-  category: { type: String, required: true },
-  date: { type: Date, default: Date.now },
-  description: String, // Opcional: podrías usarlo para guardar la descripción completa
-  whatsappNumber: String // Para identificar al usuario (tu número de WhatsApp)
+  amount: { type: Number, required: true }, // Cantidad del gasto, obligatoria
+  category: { type: String, required: true }, // Categoría del gasto, obligatoria
+  date: { type: Date, default: Date.now } // Fecha del gasto, por defecto la fecha actual
 });
-const Expense = mongoose.model('Expense', expenseSchema);
+const Expense = mongoose.model('Expense', expenseSchema); // Crea el modelo 'Expense' a partir del esquema
 
-// --- Middlewares de Express ---
-// Para parsear el cuerpo de las solicitudes, especialmente de Twilio
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+// 4. Middleware de Express
+// Necesario para que Express pueda leer los datos que Telegram envía en el cuerpo de la petición POST.
+app.use(express.json()); // Telegram envía el cuerpo de la petición como JSON
 
-// --- Ruta para el Webhook de WhatsApp ---
-app.post('/webhook/whatsapp', async (req, res) => {
-  const twiml = new MessagingResponse();
-  const incomingMsg = req.body.Body ? req.body.Body.toLowerCase().trim() : ''; // El mensaje de WhatsApp
-  const fromNumber = req.body.From; // El número de WhatsApp que envió el mensaje (tu número)
+// 5. Configuración del Webhook de Telegram
+// Cuando el bot se despliegue en Vercel, Telegram enviará las actualizaciones a esta URL.
+// NOTA: Reemplaza 'YOUR_VERCEL_APP_URL' con la URL real de tu despliegue en Vercel
+// Ejemplo: https://wa-finance-ejjiucwov-ral-camachos-projects.vercel.app
+const VERCEL_APP_URL = process.env.VERCEL_APP_URL; // Asegúrate de definir esta variable en Vercel
+const webHookUrl = `${VERCEL_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
 
-  console.log(`Mensaje recibido de ${fromNumber}: "${incomingMsg}"`);
+// Establece el webhook de Telegram. Esto le dice a Telegram dónde enviar las actualizaciones.
+bot.setWebHook(webHookUrl)
+  .then(() => console.log(`Webhook de Telegram configurado en: ${webHookUrl}`))
+  .catch(err => console.error('Error al configurar el webhook de Telegram:', err));
 
-  // --- Lógica del Bot para registrar gastos ---
-  // Ejemplo de formato esperado: "gasto 500 comida" o "gasté 1200 transporte"
+// 6. Ruta de Express para recibir las actualizaciones del Webhook de Telegram
+// Telegram enviará las actualizaciones (mensajes, etc.) a esta ruta.
+app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
+  // Procesa la actualización que Telegram envió al webhook
+  bot.processUpdate(req.body);
+  // Responde inmediatamente con un 200 OK a Telegram para indicar que la actualización fue recibida
+  res.sendStatus(200);
+});
+
+// 7. Manejador de mensajes del bot de Telegram
+// Esta función se ejecuta cada vez que el bot recibe un mensaje de un usuario.
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id; // El ID del chat para enviar respuestas de vuelta
+  const incomingMsg = msg.text ? msg.text.toLowerCase().trim() : ''; // El texto del mensaje del usuario (en minúsculas y sin espacios extra)
+
+  console.log(`Mensaje recibido en Telegram de ${chatId}: "${incomingMsg}"`); // Log para depuración
+
+  // Expresión regular para detectar el formato de "gasto [cantidad] [categoría]"
+  // Ejemplos: "gasto 150 comida", "gasté 20 transporte", "gastos 50 cafe"
   const expenseRegex = /^(gasto|gasté|gastos?)\s+(\d+(\.\d{1,2})?)\s+(.+)$/;
-  const match = incomingMsg.match(expenseRegex);
+  const match = incomingMsg.match(expenseRegex); // Intenta hacer coincidir el mensaje con la regex
 
-  if (match) {
-    const amount = parseFloat(match[2]);
-    const category = match[4].trim(); // La parte final del mensaje es la categoría
+  try {
+    if (match) {
+      // Si el mensaje coincide con el formato de gasto
+      const amount = parseFloat(match[2]); // Extrae la cantidad (ej. 150)
+      const category = match[4].trim(); // Extrae la categoría (ej. "comida")
 
-    try {
-      const newExpense = new Expense({
-        amount,
-        category,
-        whatsappNumber: fromNumber // Guarda el número para poder filtrar gastos por usuario
-      });
+      // Crea una nueva instancia del modelo de Gasto
+      const newExpense = new Expense({ amount, category });
       await newExpense.save(); // Guarda el gasto en MongoDB
-      twiml.message(`¡Gasto de $${amount.toFixed(2)} en '${category}' registrado! ✅`);
-    } catch (error) {
-      console.error('Error al guardar el gasto:', error);
-      twiml.message('Hubo un error al registrar tu gasto. Por favor, inténtalo de nuevo.');
-    }
-  } else if (incomingMsg === 'resumen' || incomingMsg === 'mis gastos') {
-      // --- Lógica para consultar gastos (Ejemplo: total por categoría este mes) ---
-      try {
-          const today = new Date();
-          const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-          const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0); // Último día del mes actual
 
-          const monthlyExpenses = await Expense.aggregate([
-              { $match: { whatsappNumber: fromNumber, date: { $gte: startOfMonth, $lte: endOfMonth } } },
-              { $group: { _id: '$category', total: { $sum: '$amount' } } },
-              { $sort: { _id: 1 } } // Ordenar por categoría
-          ]);
+      // Responde al usuario confirmando el registro de gasto
+      await bot.sendMessage(chatId, `✅ Gasto de *$${amount.toFixed(2)}* en "${category}" registrado con éxito.`, { parse_mode: 'Markdown' });
+      console.log(`Gasto registrado: ${amount} - ${category}`);
 
-          if (monthlyExpenses.length > 0) {
-              let summary = 'Resumen de tus gastos este mes:\n';
-              monthlyExpenses.forEach(exp => {
-                  summary += `- ${exp._id}: $${exp.total.toFixed(2)}\n`;
-              });
-              twiml.message(summary);
-          } else {
-              twiml.message('No tienes gastos registrados este mes. ¡Empieza a registrar!');
-          }
+    } else if (incomingMsg === 'resumen') {
+      // Si el usuario pide un resumen
+      const expenses = await Expense.find({}); // Busca todos los gastos en la base de datos
 
-      } catch (error) {
-          console.error('Error al generar el resumen:', error);
-          twiml.message('No pude generar tu resumen de gastos. Algo salió mal.');
+      if (expenses.length === 0) {
+        // Si no hay gastos registrados
+        await bot.sendMessage(chatId, 'Aún no tienes gastos registrados.');
+      } else {
+        // Si hay gastos, calcula el resumen por categoría
+        const summary = {};
+        expenses.forEach(expense => {
+          const cat = expense.category.toLowerCase();
+          summary[cat] = (summary[cat] || 0) + expense.amount;
+        });
+
+        // Construye el mensaje de resumen
+        let summaryMessage = '📊 *Resumen de tus gastos:*\n';
+        for (const cat in summary) {
+          // Formato Markdown para Telegram
+          summaryMessage += `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}: *$${summary[cat].toFixed(2)}*\n`;
+        }
+        const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+        summaryMessage += `\n*Total Gasto: $${total.toFixed(2)}*`;
+
+        // Envía el resumen al usuario, indicando que use Markdown para el formato
+        await bot.sendMessage(chatId, summaryMessage, { parse_mode: 'Markdown' });
+        console.log('Resumen de gastos enviado.');
       }
-  } else {
-    // Mensaje por defecto si no entiende el comando
-    twiml.message(
-      '¡Hola! Soy tu bot de finanzas. Para registrar un gasto, usa "gasto [monto] [categoría]". Ejemplo: "gasto 500 comida".\n' +
-      'Para ver un resumen, escribe "resumen".'
-    );
+    } else {
+      // Si el mensaje no coincide con ningún comando conocido
+      await bot.sendMessage(chatId, '👋 ¡Hola! Soy tu bot de finanzas de Telegram.\n\nPuedes enviarme:\n\n* "gasto [cantidad] [categoría]" (ej. "gasto 150 comida") para registrar un gasto.\n* "resumen" para ver tus gastos totales por categoría.', { parse_mode: 'Markdown' });
+    }
+  } catch (error) {
+    // Manejo de errores: si algo falla en la lógica, responde con un mensaje de error y loguea el error.
+    console.error('Error al procesar el mensaje o guardar el gasto:', error);
+    await bot.sendMessage(chatId, '❌ Lo siento, hubo un error al procesar tu solicitud. Por favor, intenta de nuevo más tarde.');
   }
-
-  // --- Enviar la respuesta a Twilio ---
-  res.writeHead(200, { 'Content-Type': 'text/xml' }); // Twilio espera XML como respuesta
-  res.end(twiml.toString());
 });
 
-// --- Iniciar el servidor Express ---
+// 8. Iniciar el Servidor Express
+// El servidor Express empieza a escuchar peticiones en el puerto configurado.
+// Esto es necesario para que Vercel pueda recibir los webhooks de Telegram.
 app.listen(PORT, () => {
   console.log(`Servidor Express escuchando en el puerto ${PORT}`);
-  console.log(`Abra ngrok y apunte a este puerto: ngrok http ${PORT}`);
 });
