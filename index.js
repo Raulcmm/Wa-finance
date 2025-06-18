@@ -1,3 +1,85 @@
+// 1. Carga de módulos y configuración inicial
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const TelegramBot = require('node-telegram-bot-api');
+
+const PORT = process.env.PORT || 3000;
+const app = express();
+
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error('Error: TELEGRAM_BOT_TOKEN no está definido en las variables de entorno.');
+  process.exit(1);
+}
+
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+
+// 2. Conexión a MongoDB Atlas
+// Variable para rastrear el estado de la conexión a la base de datos
+let isDbConnected = false;
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log('Conectado a MongoDB Atlas');
+    isDbConnected = true; // La conexión está lista
+  })
+  .catch(err => {
+    console.error('Error FATAL al conectar a MongoDB:', err.message);
+    isDbConnected = false; // La conexión falló al inicio
+    // Considera si quieres salir aquí o intentar continuar sin DB
+    // process.exit(1);
+  });
+
+// Manejo de eventos de conexión/desconexión para actualizar el estado
+mongoose.connection.on('connected', () => {
+  console.log('Mongoose default connection open to DB');
+  isDbConnected = true;
+});
+
+mongoose.connection.on('error', err => {
+  console.error('Mongoose default connection error:', err.message);
+  isDbConnected = false;
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('Mongoose default connection disconnected');
+  isDbConnected = false;
+});
+
+// 3. Definición del Modelo de Gasto (Esquema de Mongoose)
+const expenseSchema = new mongoose.Schema({
+  amount: { type: Number, required: true },
+  category: { type: String, required: true },
+  date: { type: Date, default: Date.now }
+});
+const Expense = mongoose.model('Expense', expenseSchema);
+
+// 4. Middleware de Express
+app.use(express.json());
+
+// 5. Configuración del Webhook de Telegram
+const VERCEL_APP_URL = process.env.VERCEL_APP_URL;
+if (!VERCEL_APP_URL) {
+  console.error('Error: VERCEL_APP_URL no está definida en las variables de entorno.');
+  process.exit(1);
+}
+
+const webHookUrl = `${VERCEL_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
+
+bot.setWebHook(webHookUrl)
+  .then(() => console.log(`Webhook de Telegram configurado en: ${webHookUrl}`))
+  .catch(err => {
+    console.error(`Error al configurar el webhook de Telegram: ${err.message}. Asegúrate de que el token es correcto y la VERCEL_APP_URL es accesible.`);
+  });
+
+// 6. Ruta de Express para recibir las actualizaciones del Webhook de Telegram
+app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
+  if (req.body) {
+    bot.processUpdate(req.body);
+  }
+  res.sendStatus(200);
+});
 // ... (tu código anterior hasta la sección 7. Manejador de mensajes del bot de Telegram)
 
 // 7. Manejador de mensajes del bot de Telegram
@@ -68,3 +150,8 @@ bot.on('message', async (msg) => {
 });
 
 // ... (el resto de tu código)
+
+// 8. Iniciar el Servidor Express
+app.listen(PORT, () => {
+  console.log(`Servidor Express escuchando en el puerto ${PORT}`);
+});
