@@ -14,7 +14,7 @@ if (!TELEGRAM_BOT_TOKEN || !RENDER_APP_URL) {
 }
 
 // 2. Inicializar bot con polling
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
 
 // 3. Conexión a MongoDB Atlas
 let isDbConnected = false;
