@@ -54,7 +54,10 @@ app.use(express.json());
 const webHookUrl = `${RENDER_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
 bot.setWebHook(webHookUrl)
   .then(() => console.log(`📬 Webhook configurado en: ${webHookUrl}`))
-  .catch(err => console.error('❌ Error al configurar webhook:', err.message));
+  .catch(err => {
+    console.log('wehook creado', webHookUrl);
+    console.error('❌ Error al configurar webhook:', err.message)
+  });
 
 app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
   if (req.body) bot.processUpdate(req.body);
