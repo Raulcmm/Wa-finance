@@ -1,159 +1,136 @@
-// 1. Carga de módulos y configuración inicial
+// 1. Módulos y configuración
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const TelegramBot = require('node-telegram-bot-api');
 
-const PORT = process.env.PORT || 3000;
 const app = express();
+const PORT = process.env.PORT || 3000;
+const { TELEGRAM_BOT_TOKEN, MONGO_URI, RENDER_APP_URL } = process.env;
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error('Error: TELEGRAM_BOT_TOKEN no está definido en las variables de entorno.');
+if (!TELEGRAM_BOT_TOKEN || !RENDER_APP_URL) {
+  console.error('❌ Error: Faltan variables de entorno (TELEGRAM_BOT_TOKEN o RENDER_APP_URL).');
   process.exit(1);
 }
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+// 2. Inicializar bot con polling
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-// 2. Conexión a MongoDB Atlas
-// Variable para rastrear el estado de la conexión a la base de datos
+// 3. Conexión a MongoDB Atlas
 let isDbConnected = false;
 
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log('Conectado a MongoDB Atlas');
-    isDbConnected = true; // La conexión está lista
-  })
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('✅ Conectado a MongoDB Atlas'))
   .catch(err => {
-    console.error('Error FATAL al conectar a MongoDB:', err.message);
-    isDbConnected = false; // La conexión falló al inicio
-    // Considera si quieres salir aquí o intentar continuar sin DB
-    // process.exit(1);
+    console.error('❌ Error al conectar a MongoDB:', err.message);
+    isDbConnected = false;
   });
 
-// Manejo de eventos de conexión/desconexión para actualizar el estado
 mongoose.connection.on('connected', () => {
-  console.log('Mongoose default connection open to DB');
+  console.log('🟢 Mongoose conectado');
   isDbConnected = true;
 });
-
 mongoose.connection.on('error', err => {
-  console.error('Mongoose default connection error:', err.message);
+  console.error('🔴 Mongoose error:', err.message);
   isDbConnected = false;
 });
-
 mongoose.connection.on('disconnected', () => {
-  console.log('Mongoose default connection disconnected');
+  console.log('🟡 Mongoose desconectado');
   isDbConnected = false;
 });
 
-// 3. Definición del Modelo de Gasto (Esquema de Mongoose)
+// 4. Modelo de Gasto
 const expenseSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   category: { type: String, required: true },
-  date: { type: Date, default: Date.now }
+  date: { type: Date, default: Date.now },
 });
 const Expense = mongoose.model('Expense', expenseSchema);
 
-// 4. Middleware de Express
+// 5. Middleware de Express
 app.use(express.json());
 
-// 5. Configuración del Webhook de Telegram
-const RENDER_APP_URL = process.env. RENDER_APP_URL;
-
-if (!RENDER_APP_URL) {
-  console.error('Error: VERCEL_APP_URL no está definida en las variables de entorno.');
-  process.exit(1);
-}
-
-// const webHookUrl = `${RENDER_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
-const webHookUrl = `<span class="math-inline">\{RENDER\_APP\_URL\}/bot</span>{TELEGRAM_BOT_TOKEN}`;
-
+// 6. Webhook para Telegram
+const webHookUrl = `${RENDER_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
 bot.setWebHook(webHookUrl)
-  .then(() => console.log(`Webhook de Telegram configurado en: ${webHookUrl}`))
-  .catch(err => {
-    console.error(`Error al configurar el webhook de Telegram: ${err.message}. Asegúrate de que el token es correcto y la VERCEL_APP_URL es accesible.`);
-  });
+  .then(() => console.log(`📬 Webhook configurado en: ${webHookUrl}`))
+  .catch(err => console.error('❌ Error al configurar webhook:', err.message));
 
-// 6. Ruta de Express para recibir las actualizaciones del Webhook de Telegram
 app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
-  if (req.body) {
-    bot.processUpdate(req.body);
-  }
+  if (req.body) bot.processUpdate(req.body);
   res.sendStatus(200);
 });
-// ... (tu código anterior hasta la sección 7. Manejador de mensajes del bot de Telegram)
 
-// 7. Manejador de mensajes del bot de Telegram
+// 7. Lógica del Bot
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const incomingMsg = (msg.text || '').toLowerCase().trim();
 
-  console.log(`Mensaje recibido en Telegram de ${chatId}: "${incomingMsg}"`);
+  console.log(`📩 Mensaje de ${chatId}: "${incomingMsg}"`);
 
-  // ***** OPTIMIZACIÓN DE EXPERIENCIA DE USUARIO DURANTE COLD START *****
-  // Verificar si la base de datos está conectada antes de intentar cualquier operación
   if (!isDbConnected) {
-    console.warn('Operación de DB solicitada, pero la base de datos NO está conectada.');
-    // Mensaje para informar al usuario que el bot está arrancando
-    await bot.sendMessage(chatId, '⌛️ Estoy arrancando... Por favor, espera un momento y vuelve a enviar tu mensaje.');
-    return; // Detiene el procesamiento del mensaje aquí
+    console.warn('⏳ DB aún no disponible.');
+    await bot.sendMessage(chatId, '⌛️ Estoy arrancando... Intenta en unos segundos.');
+    return;
   }
-  // ********************************************************************
 
   const expenseRegex = /^(gasto|gasté|gastos?)\s+(\d+(\.\d{1,2})?)\s+(.+)$/;
   const match = incomingMsg.match(expenseRegex);
 
   try {
-    // ... el resto de tu lógica de bot (la misma que ya tenías) ...
     if (match) {
       const amount = parseFloat(match[2]);
       const category = match[4].trim();
 
       const newExpense = new Expense({ amount, category });
-      await newExpense.save(); 
+      await newExpense.save();
 
-      await bot.sendMessage(chatId, `✅ Gasto de *$${amount.toFixed(2)}* en "${category}" registrado con éxito.`, { parse_mode: 'Markdown' });
-      console.log(`Gasto registrado: ${amount} - ${category}`);
+      await bot.sendMessage(chatId,
+        `✅ Gasto de *$${amount.toFixed(2)}* en "${category}" registrado con éxito.`,
+        { parse_mode: 'Markdown' });
 
+      console.log(`💾 Gasto registrado: $${amount} - ${category}`);
     } else if (incomingMsg === 'resumen') {
-      const expenses = await Expense.find({}); 
-
+      const expenses = await Expense.find({});
       if (expenses.length === 0) {
-        await bot.sendMessage(chatId, 'Aún no tienes gastos registrados.');
-      } else {
-        const summary = new Map();
-        expenses.forEach(expense => {
-          const cat = expense.category.toLowerCase();
-          summary.set(cat, (summary.get(cat) || 0) + expense.amount);
-        });
-
-        let summaryMessage = '📊 *Resumen de tus gastos:*\n';
-        for (const [cat, totalAmount] of summary) {
-          summaryMessage += `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}: *$${totalAmount.toFixed(2)}*\n`;
-        }
-        const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
-        summaryMessage += `\n*Total Gasto: $${total.toFixed(2)}*`;
-
-        await bot.sendMessage(chatId, summaryMessage, { parse_mode: 'Markdown' });
-        console.log('Resumen de gastos enviado.');
+        await bot.sendMessage(chatId, '📭 Aún no tienes gastos registrados.');
+        return;
       }
+
+      const summary = expenses.reduce((map, { category, amount }) => {
+        const key = category.toLowerCase();
+        map[key] = (map[key] || 0) + amount;
+        return map;
+      }, {});
+
+      let message = '📊 *Resumen de tus gastos:*\n';
+      for (const [cat, total] of Object.entries(summary)) {
+        message += `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}: *$${total.toFixed(2)}*\n`;
+      }
+
+      const total = expenses.reduce((sum, { amount }) => sum + amount, 0);
+      message += `\n*Total Gasto: $${total.toFixed(2)}*`;
+
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      console.log('📈 Resumen enviado.');
     } else {
-      await bot.sendMessage(chatId, '👋 ¡Hola! Soy tu bot de finanzas de Telegram.\n\nPuedes enviarme:\n\n* "gasto [cantidad] [categoría]" (ej. "gasto 150 comida") para registrar un gasto.\n* "resumen" para ver tus gastos totales por categoría.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId,
+        '👋 ¡Hola! Soy tu bot de finanzas.\n\n' +
+        'Puedes enviarme:\n' +
+        '• `gasto [cantidad] [categoría]` (ej. "gasto 150 comida")\n' +
+        '• `resumen` para ver tus gastos',
+        { parse_mode: 'Markdown' });
     }
   } catch (error) {
-    console.error('Error al procesar el mensaje o guardar el gasto:', error);
-    if (error.name === 'MongooseError' && error.message.includes('buffering timed out')) {
-        await bot.sendMessage(chatId, '❌ Lo siento, la conexión con la base de datos se perdió temporalmente. Por favor, intenta de nuevo en unos segundos.');
-    } else {
-        await bot.sendMessage(chatId, '❌ Lo siento, hubo un error inesperado al procesar tu solicitud. Por favor, intenta de nuevo más tarde.');
-    }
+    console.error('❌ Error al manejar mensaje:', error);
+    const msg = (error.name === 'MongooseError' && error.message.includes('buffering'))
+      ? '❌ Problema temporal con la base de datos. Intenta de nuevo en unos segundos.'
+      : '❌ Ocurrió un error inesperado. Por favor, intenta más tarde.';
+    await bot.sendMessage(chatId, msg);
   }
 });
 
-// ... (el resto de tu código)
-
-// 8. Iniciar el Servidor Express
+// 8. Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`Servidor Express escuchando en el puerto ${PORT}`);
+  console.log(`🚀 Servidor Express activo en puerto ${PORT}`);
 });
