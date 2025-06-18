@@ -59,7 +59,7 @@ const Expense = mongoose.model('Expense', expenseSchema);
 app.use(express.json());
 
 // 5. Configuración del Webhook de Telegram
-const RENDER_APP_URL = process.env.VERCEL_APP_URL;
+const RENDER_APP_URL = process.env. RENDER_APP_URL;
 
 if (!RENDER_APP_URL) {
   console.error('Error: VERCEL_APP_URL no está definida en las variables de entorno.');
