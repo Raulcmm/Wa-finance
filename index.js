@@ -5,124 +5,131 @@ const mongoose = require('mongoose'); // ODM (Object Data Modeling) para MongoDB
 const TelegramBot = require('node-telegram-bot-api'); // Librería para interactuar con la API de Telegram
 
 // Configura el puerto en el que escuchará el servidor Express.
-// Usa el puerto que Vercel le asigne (process.env.PORT) o el 3000 si está en local.
 const PORT = process.env.PORT || 3000;
 const app = express(); // Crea una instancia de la aplicación Express
 
 // Obtén el token del bot de Telegram de las variables de entorno
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Si el token no está definido, sal del proceso. ¡CRÍTICO para la seguridad y funcionamiento!
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error('Error: TELEGRAM_BOT_TOKEN no está definido en las variables de entorno.');
+  process.exit(1); // Sale de la aplicación si el token no está configurado
+}
+
 // Crea una nueva instancia del bot de Telegram.
-// NOTA: No le pasamos el "polling: true" aquí porque usaremos webhooks en Vercel.
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
 
 // 2. Conexión a MongoDB Atlas
+// Añadimos más opciones para una conexión robusta y un mejor manejo de errores inicial
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('Conectado a MongoDB Atlas'))
-  .catch(err => console.error('Error al conectar a MongoDB:', err));
+  .then(() => {
+    console.log('Conectado a MongoDB Atlas');
+  })
+  .catch(err => {
+    console.error('Error FATAL al conectar a MongoDB:', err.message);
+    // Podrías decidir salir si la DB es crítica para iniciar
+    // process.exit(1);
+  });
+
+// Opcional: Manejo de errores de conexión después de la conexión inicial
+mongoose.connection.on('error', err => {
+  console.error('Error de conexión a MongoDB después del inicio:', err.message);
+});
 
 // 3. Definición del Modelo de Gasto (Esquema de Mongoose)
-// Este es el plano de cómo se guardarán los datos de un gasto en tu base de datos.
 const expenseSchema = new mongoose.Schema({
-  amount: { type: Number, required: true }, // Cantidad del gasto, obligatoria
-  category: { type: String, required: true }, // Categoría del gasto, obligatoria
-  date: { type: Date, default: Date.now } // Fecha del gasto, por defecto la fecha actual
+  amount: { type: Number, required: true },
+  category: { type: String, required: true },
+  date: { type: Date, default: Date.now }
 });
-const Expense = mongoose.model('Expense', expenseSchema); // Crea el modelo 'Expense' a partir del esquema
+const Expense = mongoose.model('Expense', expenseSchema);
 
 // 4. Middleware de Express
-// Necesario para que Express pueda leer los datos que Telegram envía en el cuerpo de la petición POST.
 app.use(express.json()); // Telegram envía el cuerpo de la petición como JSON
 
 // 5. Configuración del Webhook de Telegram
-// Cuando el bot se despliegue en Vercel, Telegram enviará las actualizaciones a esta URL.
-// NOTA: Reemplaza 'YOUR_VERCEL_APP_URL' con la URL real de tu despliegue en Vercel
-// Ejemplo: https://wa-finance-ejjiucwov-ral-camachos-projects.vercel.app
-const VERCEL_APP_URL = process.env.VERCEL_APP_URL; // Asegúrate de definir esta variable en Vercel
+// Asegúrate de que VERCEL_APP_URL esté definida
+const VERCEL_APP_URL = process.env.VERCEL_APP_URL;
+if (!VERCEL_APP_URL) {
+  console.error('Error: VERCEL_APP_URL no está definida en las variables de entorno.');
+  process.exit(1); // La URL es crítica para el webhook
+}
+
 const webHookUrl = `${VERCEL_APP_URL}/bot${TELEGRAM_BOT_TOKEN}`;
 
-// Establece el webhook de Telegram. Esto le dice a Telegram dónde enviar las actualizaciones.
 bot.setWebHook(webHookUrl)
   .then(() => console.log(`Webhook de Telegram configurado en: ${webHookUrl}`))
-  .catch(err => console.error('Error al configurar el webhook de Telegram:', err));
+  .catch(err => {
+    console.error(`Error al configurar el webhook de Telegram: ${err.message}`);
+    // Un 401 aquí significa token inválido, aunque ya lo chequeamos al inicio
+    // Podría ser también un problema de URL inaccesible desde Telegram
+  });
 
 // 6. Ruta de Express para recibir las actualizaciones del Webhook de Telegram
-// Telegram enviará las actualizaciones (mensajes, etc.) a esta ruta.
 app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
-  // Procesa la actualización que Telegram envió al webhook
-  bot.processUpdate(req.body);
-  // Responde inmediatamente con un 200 OK a Telegram para indicar que la actualización fue recibida
-  res.sendStatus(200);
+  // Asegurarse de que el cuerpo de la petición no esté vacío antes de procesar
+  if (req.body) {
+    bot.processUpdate(req.body);
+  }
+  res.sendStatus(200); // Siempre responde con 200 OK a Telegram
 });
 
 // 7. Manejador de mensajes del bot de Telegram
-// Esta función se ejecuta cada vez que el bot recibe un mensaje de un usuario.
 bot.on('message', async (msg) => {
-  const chatId = msg.chat.id; // El ID del chat para enviar respuestas de vuelta
-  const incomingMsg = msg.text ? msg.text.toLowerCase().trim() : ''; // El texto del mensaje del usuario (en minúsculas y sin espacios extra)
+  const chatId = msg.chat.id;
+  // Usamos un valor predeterminado si msg.text es undefined/null para evitar errores
+  const incomingMsg = (msg.text || '').toLowerCase().trim();
 
-  console.log(`Mensaje recibido en Telegram de ${chatId}: "${incomingMsg}"`); // Log para depuración
+  console.log(`Mensaje recibido en Telegram de ${chatId}: "${incomingMsg}"`);
 
-  // Expresión regular para detectar el formato de "gasto [cantidad] [categoría]"
-  // Ejemplos: "gasto 150 comida", "gasté 20 transporte", "gastos 50 cafe"
   const expenseRegex = /^(gasto|gasté|gastos?)\s+(\d+(\.\d{1,2})?)\s+(.+)$/;
-  const match = incomingMsg.match(expenseRegex); // Intenta hacer coincidir el mensaje con la regex
+  const match = incomingMsg.match(expenseRegex);
 
   try {
     if (match) {
-      // Si el mensaje coincide con el formato de gasto
-      const amount = parseFloat(match[2]); // Extrae la cantidad (ej. 150)
-      const category = match[4].trim(); // Extrae la categoría (ej. "comida")
+      const amount = parseFloat(match[2]);
+      const category = match[4].trim();
 
-      // Crea una nueva instancia del modelo de Gasto
       const newExpense = new Expense({ amount, category });
-      await newExpense.save(); // Guarda el gasto en MongoDB
+      await newExpense.save();
 
-      // Responde al usuario confirmando el registro de gasto
       await bot.sendMessage(chatId, `✅ Gasto de *$${amount.toFixed(2)}* en "${category}" registrado con éxito.`, { parse_mode: 'Markdown' });
       console.log(`Gasto registrado: ${amount} - ${category}`);
 
     } else if (incomingMsg === 'resumen') {
-      // Si el usuario pide un resumen
-      const expenses = await Expense.find({}); // Busca todos los gastos en la base de datos
+      // Uso de populate('expenses') no es necesario aquí ya que no tienes relaciones
+      const expenses = await Expense.find({});
 
       if (expenses.length === 0) {
-        // Si no hay gastos registrados
         await bot.sendMessage(chatId, 'Aún no tienes gastos registrados.');
       } else {
-        // Si hay gastos, calcula el resumen por categoría
-        const summary = {};
+        const summary = new Map(); // Usamos Map para un resumen más eficiente
         expenses.forEach(expense => {
           const cat = expense.category.toLowerCase();
-          summary[cat] = (summary[cat] || 0) + expense.amount;
+          summary.set(cat, (summary.get(cat) || 0) + expense.amount);
         });
 
-        // Construye el mensaje de resumen
         let summaryMessage = '📊 *Resumen de tus gastos:*\n';
-        for (const cat in summary) {
-          // Formato Markdown para Telegram
-          summaryMessage += `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}: *$${summary[cat].toFixed(2)}*\n`;
+        // Iteramos sobre el Map para construir el mensaje
+        for (const [cat, totalAmount] of summary) {
+          summaryMessage += `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}: *$${totalAmount.toFixed(2)}*\n`;
         }
         const total = expenses.reduce((sum, expense) => sum + expense.amount, 0);
         summaryMessage += `\n*Total Gasto: $${total.toFixed(2)}*`;
 
-        // Envía el resumen al usuario, indicando que use Markdown para el formato
         await bot.sendMessage(chatId, summaryMessage, { parse_mode: 'Markdown' });
         console.log('Resumen de gastos enviado.');
       }
     } else {
-      // Si el mensaje no coincide con ningún comando conocido
       await bot.sendMessage(chatId, '👋 ¡Hola! Soy tu bot de finanzas de Telegram.\n\nPuedes enviarme:\n\n* "gasto [cantidad] [categoría]" (ej. "gasto 150 comida") para registrar un gasto.\n* "resumen" para ver tus gastos totales por categoría.', { parse_mode: 'Markdown' });
     }
   } catch (error) {
-    // Manejo de errores: si algo falla en la lógica, responde con un mensaje de error y loguea el error.
     console.error('Error al procesar el mensaje o guardar el gasto:', error);
     await bot.sendMessage(chatId, '❌ Lo siento, hubo un error al procesar tu solicitud. Por favor, intenta de nuevo más tarde.');
   }
 });
 
 // 8. Iniciar el Servidor Express
-// El servidor Express empieza a escuchar peticiones en el puerto configurado.
-// Esto es necesario para que Vercel pueda recibir los webhooks de Telegram.
 app.listen(PORT, () => {
   console.log(`Servidor Express escuchando en el puerto ${PORT}`);
 });
