@@ -61,6 +61,13 @@ app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
   res.sendStatus(200);
 });
 
+//evitar que se duerma y el cold-start
+app.get('/ping', (req, res) => {
+  res.send('✅ Bot activo');
+});
+
+
+
 // 7. Lógica del Bot
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
